@@ -20,30 +20,33 @@
 Adafruit_SSD1306 display( DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, OLED_RESET );
 MPU6050 mpu;
 
-// MPU control/status vars
-bool dmpReady = false;  // set true if DMP init was successful
-// uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
-// uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
-// uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
-// uint16_t fifoCount;     // count of all bytes currently in FIFO
-uint8_t fifoBuffer[64]; // FIFO storage buffers
-
 byte lastLine = 0;
-float displayAccelerationX = 0.0;
-float displayAccelerationY = 0.0;
-float targetAccelerationX = 0.0;
-float targetAccelerationY = 0.0;
+// Acceleration lerp values
+float displayAccelerationX = 0.0; // [ LSB ] current X component of acceleration vector of the displayed cursor
+float displayAccelerationY = 0.0; // [ LSB ] current Y component of acceleration vector of the displayed cursor
+float targetAccelerationX = 0.0; // [ LSB ] cached maximum X component of acceleration vector to which the displayed cursor will move
+float targetAccelerationY = 0.0; // [ LSB ] cached maximum Y component of acceleration vector to which the displayed cursor will move
+
+// whether or not the current displayAcceleration has lerped to the targetAcceleration
 bool isApproachingX = false;
 bool isApproachingY = false;
 
-// orientation/motion vars
-Quaternion q;           // [w, x, y, z]         quaternion container
-VectorInt16 aa;         // [x, y, z]            accel sensor measurements
-VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
-VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
-VectorFloat gravity;    // [x, y, z]            gravity vector
-float euler[ 3 ];         // [psi, theta, phi]    Euler angle container
-float ypr[ 3 ];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+// MPU Status
+bool dmpReady = false; // set true if DMP init was successful
+// uint8_t mpuIntStatus; // holds actual interrupt status byte from MPU
+// uint8_t devStatus; // return status after each device operation (0 = success, !0 = error)
+// uint16_t packetSize; // expected DMP packet size (default is 42 bytes)
+// uint16_t fifoCount; // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffers
+
+// Device Orientation Vectors
+Quaternion q; // [w, x, y, z] quaternion container
+VectorInt16 aa; // [x, y, z] accel sensor measurements
+VectorInt16 aaReal; // [x, y, z] gravity-free accel sensor measurements
+VectorInt16 aaWorld; // [x, y, z] world-frame accel sensor measurements
+VectorFloat gravity; // [x, y, z] gravity vector
+float euler[ 3 ]; // [psi, theta, phi] Euler angle container
+float ypr[ 3 ]; // [yaw, pitch, roll] yaw/pitch/roll container and gravity vector
 
 volatile bool mpuInterrupt = false; // indicates whether MPU interrupt pin has gone high
 void dmpDataReady() {
@@ -69,7 +72,7 @@ void setup() {
 
 	#ifdef DEBUG
 	Serial.begin(9600);
-	while (!Serial); // wait for Leonardo enumeration, others continue immediately
+	while (!Serial);
 	#endif
 
 	slowType( F("IMU Starting >"), 10, true );
@@ -187,7 +190,6 @@ void drawHeader(){
 	// Pitch
 	display.setCursor( READOUT_X_OFFSET + 85, HEIGHT_OFFSET );
 	display.print( F("Pitch") );
-
 }
 
 void printOffsetText( byte xOffset, byte yOffset, float datum ){
@@ -215,11 +217,11 @@ void printOffsetText( byte xOffset, byte yOffset, float datum ){
 
 void plotAcceleration( VectorInt16 acceleration, byte xOffset, byte yOffset ){
 
-	#define width 36
-	#define tickCount 8
-	#define xCenter xOffset + ( width / 2 )
-	#define yCenter yOffset + ( width / 2 )
-	#define accelerationScale 5461 // 1G (8192 LSB) | 0.5G (5461 LSB) ? 0.25G (2730.5)
+	byte width = 36;
+	byte tickCount = 8;
+	byte xCenter = xOffset + ( width / 2 );
+	byte yCenter = yOffset + ( width / 2 );
+	short accelerationScale = 5461; // 1G (8192 LSB) | 0.5G (5461 LSB) ? 0.25G (2730.5)
 
 	display.drawRect( xOffset, yOffset, width, width, WHITE );
 
@@ -244,7 +246,6 @@ void plotAcceleration( VectorInt16 acceleration, byte xOffset, byte yOffset ){
 
 void smoothAndApproach( float& target, float& current, bool& isApproachingTarget, float immediate ){
 
-
 	// new immediate target
 	if( abs( immediate ) > 0 && !isApproachingTarget ){
 
@@ -265,22 +266,21 @@ void smoothAndApproach( float& target, float& current, bool& isApproachingTarget
 	}
 
 	current = lerp( current, target, 0.15 );
-
 }
 
 void renderGauge( double angle, byte xOffset, byte yOffset, byte type ) {
 	// type : roll [ 0 ] pitch [ 1 ] yaw [ 2 ]
-	#define radius 16
-	#define xCenter radius
-	#define yCenter radius
+	byte radius = 16;
+	byte xCenter = radius;
+	byte yCenter = radius;
 	byte needleLength = ( type == 1 ) ? ( radius * 2 ) - 12 : ( radius * 2 ) + 8;
 
-	#define x -needleLength / 2
-	#define y  0
-	#define x1 needleLength / 2
-	#define y1 0
-	#define cx ( x + x1 ) / 2
-	#define cy ( y + y1 ) / 2
+	short x = -needleLength / 2;
+	byte y = 0;
+	byte x1 = needleLength / 2;
+	byte y1 = 0;
+	byte cx = ( x + x1 ) / 2;
+	byte cy = ( y + y1 ) / 2;
 
 	// draw border of the gauge
 	display.drawCircle( xCenter + xOffset, yCenter + yOffset, radius, WHITE );
@@ -322,12 +322,12 @@ void renderGauge( double angle, byte xOffset, byte yOffset, byte type ) {
 void drawRotatedTriangle( int sign, int xOffset, int yOffset, float theta ){
 
 	int tX = 3 * sign;
-	#define tY  0
+	byte tY = 0;
 
-	#define t1X 0
+	byte t1X = 0;
 	int t1Y = 2 * sign;
 
-	#define t2X 0
+	byte t2X = 0;
 	int t2Y = -2 * sign;
 
 	display.drawTriangle(

@@ -1,139 +1,157 @@
 // TEMP Sensor Interface with OLED output and graphing
 
 // Gotchas:
+// - IMPORTANT : Adafruit DHT Library 1.3.0 is the last stable library for Chinese DHT22 clones. Anything newer has, in practice, failed to report
 // - display has visual artifacts at ~40% dynamic memory
-// - arxduino becomes unstable at ~50% dynamic memory
+// - arduino becomes unstable at ~50% dynamic memory
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <DHT.h>
-#include <Fonts/URW_Gothic_L_Book_20.h>
-#include <Fonts/URW_Gothic_L_Book_5.h>
+#include "URW_Gothic_L_Book_20.h"
+#include "URW_Gothic_L_Book_5.h"
 
 #define OLED_RESET 4
 #define DHTPIN 2     // [ INPUT ][ DIGITAL ] pin for Temp Sensor
 #define DHTTYPE DHT22 //  Temp Sensor Type: DHT 22 (AM2302)
+#define DISPLAY_WIDTH 128 // [ PIXELS ] number of available horizontal pixels
+#define DISPLAY_HEIGHT 64 // [ PIXELS ] number of available vertical pixels
+#define LAST_LINE_INDENT 10
 
-DHT dht(DHTPIN, DHTTYPE);
-Adafruit_SSD1306 display(OLED_RESET);
+#define ALERT_BLINK_INTERVAL 500 // [ MILLIS ] between alert banners
 
+DHT dht( DHTPIN, DHTTYPE );
+Adafruit_SSD1306 display( DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, OLED_RESET );
+
+byte lastLine = 0;
 bool sensorFailedToReport = false;
 bool pollingTick = true;
+bool advanceGraph = false;
 
-long previousMillisSensor = 0;
-long previousMillisGraph = 0;
+unsigned long previousMillisSensor = 0;
+unsigned long previousMillisGraph = 0;
+unsigned long previousMillisBlinkTick = 0;
 
 // DHT sensor read is SLOW, needs ~2 seconds to read reliably
-const long sensorReadInterval PROGMEM = 2000; // [ MILLIS ] between sensor reads
+#define SENSOR_READ_INTERVAL 2000 // [ MILLIS ] between sensor reads
 
 // Graph Size
-const int graphHeight PROGMEM = 26;
-const int graphWidth PROGMEM = 44;
-const int xOffset PROGMEM = 14;
-const int yOffset PROGMEM = graphHeight + 8;
+#define GRAPH_HEIGHT 26
+#define GRAPH_WIDTH 44
+#define X_OFFSET 14
+#define Y_OFFSET GRAPH_HEIGHT + 8
 
 // Historical update
-const long graphTimeline PROGMEM = 3.6e+6; // [ MILLIS ] of overall historical reads to display ( 1 hour )
-const long graphUpdateInterval PROGMEM = graphTimeline / (( graphWidth / 2 ) - 1); // [ MILLIS ] between graph updates
+#define GRAPH_DATUM_COUNT 43
+#define GRAPH_TIMELINE 3.6e+6 // [ MILLIS ] of overall historical reads to display ( 1 hour )
+#define GRAPH_UPDATE_INTERVAL GRAPH_TIMELINE / (( GRAPH_WIDTH / 2 ) - 1) // [ MILLIS ] between graph updates
 
 // Bounds
-const int topBoundHumidity PROGMEM = 100;
-const int lowBoundHumidity PROGMEM = 0;
+#define TOP_BOUND_HUMIDITY 100
+#define LOW_BOUND_HUMIDITY 0
 
-const int topBoundTemp PROGMEM = 40;
-const int lowBoundTemp PROGMEM = -10;
+#define TOP_BOUND_TEMP 40
+#define LOW_BOUND_TEMP -10
 
 // Temp Sensor Values
 float measuredHumidity = 0;
 float measuredTemperature = 0;
 // float measuredHeatIndex = 0;
 
-byte count;
-byte temperatureSensorArray[64]; // double the bar graph resolution
-byte humiditySensorArray[64];
+byte temperatureSensorArray[ GRAPH_DATUM_COUNT ]; // double the bar graph resolution
+byte humiditySensorArray[ GRAPH_DATUM_COUNT ];
 
-const char graphFill PROGMEM = 'F'; //decide either filled or dot display (D=dot, any else filled)
-const char drawDirection PROGMEM = 'R'; //decide drawing direction, from right or from left (L=from left to right, any else from right to left)
-const char slope PROGMEM = 'W'; //slope colour of filled mode white or black slope (W=white, any else black. Well, white is blue in this dispay but you get the point)
+void setup(){
 
-const unsigned char humidityBitmap [] PROGMEM = {
-	0x00, 0x03, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x07, 0x80, 0x00, 0x00, 0x04, 0x80, 0x00,
-	0x00, 0x0c, 0xc0, 0x00, 0x00, 0x08, 0x40, 0x00, 0x00, 0x10, 0x20, 0x00, 0x00, 0x10, 0x20, 0x00,
-	0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x0c, 0x00,
-	0x00, 0x80, 0x04, 0x00, 0x01, 0x80, 0x06, 0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0x3c, 0x43, 0x00,
-	0x02, 0x64, 0xc1, 0x00, 0x02, 0x64, 0x81, 0x00, 0x06, 0x3d, 0x81, 0x80, 0x06, 0x11, 0x00, 0x80,
-	0x04, 0x02, 0x00, 0x80, 0x06, 0x06, 0xf1, 0x80, 0x02, 0x04, 0x99, 0x00, 0x02, 0x0c, 0x99, 0x00,
-	0x03, 0x08, 0xf3, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x80, 0x04, 0x00, 0x00, 0xc0, 0x0c, 0x00,
-	0x00, 0x38, 0x70, 0x00, 0x00, 0x0f, 0xc0, 0x00
-};
+	Wire.begin();
+	Wire.setClock( 400000L ); // 400kHz I2C clock
+	Wire.setWireTimeout( 4000, true );
 
-const unsigned char temperatureBitmap [] PROGMEM = {
-	0x00, 0x00, 0x80, 0x00, 0x00, 0xc1, 0xe0, 0x00, 0x01, 0xc2, 0x20, 0x00, 0x00, 0xc2, 0x20, 0x00,
-	0x00, 0x7a, 0xb0, 0x00, 0x00, 0x6a, 0xb0, 0x00, 0x00, 0x42, 0xb0, 0x00, 0x00, 0x42, 0xb0, 0x00,
-	0x00, 0x3a, 0xb8, 0x00, 0x00, 0x02, 0xb0, 0x00, 0x00, 0x02, 0xb0, 0x00, 0x00, 0x02, 0xa0, 0x00,
-	0x00, 0x02, 0xb8, 0x00, 0x00, 0x02, 0xb0, 0x00, 0x00, 0x02, 0xb0, 0x00, 0x00, 0x02, 0xb0, 0x00,
-	0x00, 0x02, 0xb0, 0x00, 0x00, 0x02, 0xb8, 0x00, 0x00, 0x02, 0xa0, 0x00, 0x00, 0x06, 0x98, 0x00,
-	0x00, 0x08, 0x8c, 0x00, 0x00, 0x11, 0xc4, 0x00, 0x00, 0x12, 0x24, 0x00, 0x00, 0x12, 0x32, 0x00,
-	0x00, 0x12, 0x26, 0x00, 0x00, 0x13, 0xe4, 0x00, 0x00, 0x18, 0x04, 0x00, 0x00, 0x0c, 0x08, 0x00,
-	0x00, 0x07, 0xf0, 0x00, 0x00, 0x01, 0xc0, 0x00
-};
+	display.begin( SSD1306_SWITCHCAPVCC, 0x3C );
+	wipeDisplay();
 
-void setup()
-{
-	// Serial.begin(9600);
+	display.setTextColor( WHITE );
+	slowType( F("TEMP SENSE START >"), 10, true );
 
-	// Bring Temp Sensor Online
+	lastLine += LAST_LINE_INDENT;
+
+	slowType( F("SENSOR REPORTS: "), 10, true );
 	dht.begin();
-	// Serial.println("Temp Sensor Initializing...");
+	delay( SENSOR_READ_INTERVAL );
+	slowPrintSuccessOrFail(  dht.read()  );
 
-	for (count = 0; count <= 64; count++)
-	{
-		temperatureSensorArray[count] = 0;
-		humiditySensorArray[count] = 0;
-	}
+	slowType( F("CONFIG DEVICE:  "), 10, true );
+	clearHistoricalValues();
+	slowPrintSuccessOrFail( true );
 
-	// Bring OLED Online
-	display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3C
-	display.clearDisplay();
-
-	display.setTextColor(WHITE);
-	// Header
-	display.setCursor(40,0);
-	display.setTextSize(1);
-	display.print("Temperature\n");
-
-	display.setCursor(66,14);
-	display.print("and\n");
-
-	display.setCursor(50,28);
-	display.print("Humidity");
-
-	display.drawBitmap(0, 0,humidityBitmap,30,30, WHITE);
-	display.drawBitmap(0, 35,temperatureBitmap,30,30, WHITE);
-
+	display.setFont(&URW_Gothic_L_Book_20);
+	display.setCursor( 22, 62 );
+	display.print(F("ONLINE!"));
 	display.display();
-	display.setTextSize(1);
-	display.setCursor(30,51);
-	display.print("..Initializing..");
 
-	display.display();
-	delay(1500);
+	delay( 3000 );
+	wipeDisplay();
 }
 
-void loop()
-{
+void loop(){
+
+	advanceAnimationTicks();
+
+	display.clearDisplay();
+
+	renderNumericOutput( X_OFFSET, 0, 'temp' );
+	renderNumericOutput( X_OFFSET, Y_OFFSET, 'humid' );
+
+	// Temp Render
+	renderGraph( advanceGraph, temperatureSensorArray, X_OFFSET, 0 );
+	renderAxes( X_OFFSET, 0,  TOP_BOUND_TEMP, LOW_BOUND_TEMP, 'temp' );
+
+	// Humidity Render
+	renderGraph( advanceGraph, humiditySensorArray, X_OFFSET, Y_OFFSET );
+	renderAxes( X_OFFSET, Y_OFFSET, TOP_BOUND_HUMIDITY, LOW_BOUND_HUMIDITY, 'humid' );
+
+	if( sensorFailedToReport && pollingTick ){
+
+		renderSensorErrorAlert();
+		advanceGraph = false;
+	}
+	display.display();
+}
+
+void clearHistoricalValues(){
+
+	for( byte count = 0; count < GRAPH_DATUM_COUNT; count++ ){
+
+		temperatureSensorArray[ count ] = 0;
+		humiditySensorArray[ count ] = 0;
+	}
+}
+
+void renderSensorErrorAlert(){
+
+	display.fillRoundRect( 20, 25, 94, 20, 3, WHITE );
+	display.setCursor( 22, 32 );
+
+	display.setTextColor( BLACK, WHITE );
+	display.print( F("Sensor Offline!") );
+	display.setTextColor( WHITE, BLACK );
+}
+
+void advanceAnimationTicks(){
 
 	unsigned long currentMillis = millis();
-	bool advanceGraph = false;
+	advanceGraph = false;
 
-	if( previousMillisSensor == 0 || currentMillis - previousMillisSensor > sensorReadInterval) {
+	bool alertBlinkTick = ( previousMillisBlinkTick == 0 || currentMillis - previousMillisBlinkTick > ALERT_BLINK_INTERVAL );
+
+	if( previousMillisSensor == 0 || currentMillis - previousMillisSensor > SENSOR_READ_INTERVAL) {
 		previousMillisSensor = currentMillis;
 
 		readFromSensor();
 	}
 
-	if(previousMillisGraph == 0 || currentMillis - previousMillisGraph > graphUpdateInterval) {
+	if(previousMillisGraph == 0 || currentMillis - previousMillisGraph > GRAPH_UPDATE_INTERVAL ) {
 		previousMillisGraph = currentMillis;
 
 		if( !sensorFailedToReport ){
@@ -142,54 +160,35 @@ void loop()
 	}
 
 
-	// clear buffer
-	display.fillScreen(BLACK);
-	display.clearDisplay();
+	if( alertBlinkTick ){
 
-	renderNumericOutput( xOffset, 0, 'temp' );
-	renderNumericOutput( xOffset, yOffset, 'humid' );
-
-	// Temp Render
-	renderGraph(advanceGraph, temperatureSensorArray, xOffset, 0);
-	renderAxes( xOffset, 0,  topBoundTemp, lowBoundTemp, 'temp' );
-
-	// Humidity Render
-	renderGraph(advanceGraph, humiditySensorArray, xOffset, yOffset );
-	renderAxes( xOffset, yOffset, topBoundHumidity, lowBoundHumidity, 'humid' );
-
-	if( sensorFailedToReport && pollingTick ){
-		display.fillRoundRect(20,25,94,20,3,WHITE);
-		display.setCursor(22,32);
-
-		display.setTextColor(BLACK,WHITE);
-		display.print("Sensor Offline!");
-		display.setTextColor(WHITE,BLACK);
-		advanceGraph = false;
+		previousMillisBlinkTick = currentMillis;
+		pollingTick = !pollingTick;
 	}
-	pollingTick = !pollingTick;
-	display.display();
 }
 
 void readFromSensor(){
-	float humidity = dht.readHumidity();
-	float temperature = dht.readTemperature();
+
+
+	measuredHumidity = dht.readHumidity();
+	measuredTemperature = dht.readTemperature();
 
 	// Bail  early if sensor fails to report proper reading
-	if (isnan(temperature) || isnan(humidity)){
+	if( isnan( measuredTemperature ) || isnan( measuredHumidity )){
 		sensorFailedToReport = true;
+		measuredTemperature = isnan( measuredTemperature ) ? 0.0 : measuredTemperature;
+		measuredHumidity = isnan( measuredHumidity ) ? 0.0 : measuredHumidity;
 		return;
 	}else{
 		sensorFailedToReport = false;
 	}
 
 	// Humidity Reading
-	measuredHumidity = humidity;
-	humiditySensorArray[0] = map( humidity, lowBoundHumidity, topBoundHumidity, 0, graphHeight );
+	humiditySensorArray[ 0 ] = map( measuredHumidity, LOW_BOUND_HUMIDITY, TOP_BOUND_HUMIDITY, 0, GRAPH_HEIGHT );
 
 	// Temperature Reading
-	measuredTemperature = temperature;
-	int constrained = constrain(measuredTemperature, lowBoundTemp, 80);
-	temperatureSensorArray[0] = map(constrained, lowBoundTemp, topBoundTemp, 0, graphHeight );
+	int constrained = constrain( measuredTemperature, LOW_BOUND_TEMP, 80);
+	temperatureSensorArray[ 0 ] = map( constrained, LOW_BOUND_TEMP, TOP_BOUND_TEMP, 0, GRAPH_HEIGHT );
 
 	// Compute heat index
 	// measuredHeatIndex = dht.computeHeatIndex(measuredTemperature, measuredHumidity, false);
@@ -198,70 +197,48 @@ void readFromSensor(){
 	// measuredTemperature = (float) map(pot, 0, 1023, -40, 80 );
 }
 
-void renderGraph( bool advanceGraph, byte sensorArray[], int xOffset, int yOffset ){
+void renderGraph( bool advanceGraph, byte sensorArray[], byte xOffset, byte yOffset ){
 
-	for (int step = 2; step < graphWidth; step+=2 ){
-		int position = yOffset + graphHeight - sensorArray[step - 1];
+	for( byte step = 2; step < GRAPH_DATUM_COUNT; step+=2 ){
+		byte position = yOffset + GRAPH_HEIGHT - sensorArray[ step - 1 ];
 
-		if( position != graphHeight + yOffset ){
-			if (graphFill == 'D' || graphFill == 'd'){
-				if (drawDirection == 'L' || drawDirection == 'l'){
-					display.drawPixel(step + xOffset, position, WHITE);
-				}else{
-					// draw dots from right to left
-					display.drawPixel(graphWidth - step + xOffset, position, WHITE);
-				}
-			}else{
-				if (drawDirection == 'L' || drawDirection == 'l'){
-					if (slope == 'W' || slope == 'w'){
-						display.drawLine(step + xOffset, graphHeight + yOffset - 1, step + xOffset, position, WHITE);
-					}else{
-						display.drawLine(step + xOffset, 1, step + xOffset, position, WHITE);
-					}
-				}else{
-					if (slope == 'W' || slope == 'w'){
-						display.drawLine(graphWidth - step + xOffset, graphHeight  + yOffset - 1, graphWidth - step + xOffset, position, WHITE);
-					}else{
-						display.drawLine(graphWidth - step + xOffset, yOffset + 1, graphWidth - step + xOffset, position, WHITE);
-					}
-				}
-			}
+		if( position != GRAPH_HEIGHT + yOffset ){
+			display.drawLine(GRAPH_WIDTH - step + xOffset, GRAPH_HEIGHT  + yOffset - 1, GRAPH_WIDTH - step + xOffset, position, WHITE);
 		}
 	}
 	if( advanceGraph ){
 		// advanced historical values
-		for (int step2 = graphWidth; step2 >= 2; step2--){
-			sensorArray[step2 - 1] = sensorArray[step2 - 2];
+		for( byte step2 = GRAPH_DATUM_COUNT; step2 >= 2; step2--){
+			sensorArray[ step2 - 1 ] = sensorArray[ step2 - 2 ];
 		}
 	}
 }
 
-void renderAxes( int xOffset, int yOffset, int topBound, int lowBound, char *type )
-{
+void renderAxes( byte xOffset, byte yOffset, byte topBound, int lowBound, char *type ){
 
 	//bounding vert line
-	display.drawLine( xOffset, yOffset,  xOffset, graphHeight + yOffset, WHITE);
-	display.drawLine(graphWidth + xOffset, yOffset, graphWidth + xOffset, graphHeight + yOffset, WHITE);
+	display.drawLine( xOffset, yOffset,  xOffset, GRAPH_HEIGHT + yOffset, WHITE);
+	display.drawLine(GRAPH_WIDTH + xOffset, yOffset, GRAPH_WIDTH + xOffset, GRAPH_HEIGHT + yOffset, WHITE);
 
 	// scale marks
-	for (count = 0; count <= graphHeight; count += (graphHeight)){
-		int position = graphHeight - count;
-		int scaleMark = map( graphHeight - position, 0, graphHeight, lowBound, topBound);
+	for( byte count = 0; count <= GRAPH_HEIGHT; count += GRAPH_HEIGHT ){
+		byte position = GRAPH_HEIGHT - count;
+		int scaleMark = map( GRAPH_HEIGHT - position, 0, GRAPH_HEIGHT, lowBound, topBound);
 		int scaleOffsetStart = 0;
 
 		// format negative values differently
 		if( scaleMark < 0 ){
 			scaleMark = abs(scaleMark);
 			scaleOffsetStart = 3;
-			display.drawPixel(count , yOffset + graphHeight, WHITE);
-			display.drawPixel(count+1 , yOffset + graphHeight, WHITE);
+			display.drawPixel(count , yOffset + GRAPH_HEIGHT, WHITE);
+			display.drawPixel(count+1 , yOffset + GRAPH_HEIGHT, WHITE);
 		}
 		// tuck lower value of y-axis into graph
 		if( count == 0 ){
 			position -= 2;
 		}
 
-		if( type == 'temp' && count == graphHeight ){
+		if( type == 'temp' && count == GRAPH_HEIGHT ){
 
 			scaleOffsetStart += 3;
 		}
@@ -278,13 +255,13 @@ void renderAxes( int xOffset, int yOffset, int topBound, int lowBound, char *typ
 		display.print(scaleMark);
 		display.setFont(NULL);
 
-		display.drawLine(graphWidth + xOffset, count + yOffset, graphWidth - (graphWidth/16) + xOffset, count + yOffset, WHITE);
-		display.drawLine( xOffset, count + yOffset, graphWidth/16 + xOffset, count + yOffset, WHITE);
+		display.drawLine(GRAPH_WIDTH + xOffset, count + yOffset, GRAPH_WIDTH - (GRAPH_WIDTH/16) + xOffset, count + yOffset, WHITE);
+		display.drawLine( xOffset, count + yOffset, GRAPH_WIDTH/16 + xOffset, count + yOffset, WHITE);
 	}
 
-	for (count = 10 + xOffset; count < graphWidth + xOffset; count += 10){
+	for( byte count = 10 + xOffset; count < GRAPH_WIDTH + xOffset; count += 10 ){
 		display.drawPixel(count, yOffset , WHITE);
-		display.drawPixel(count, yOffset + graphHeight + 2 , WHITE);
+		display.drawPixel(count, yOffset + GRAPH_HEIGHT + 2 , WHITE);
 	}
 }
 
@@ -293,7 +270,7 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 	// Text Spacing
 	const int textPad PROGMEM = 4; // horizontal space between numerical output and graph
 	const int newLinePad PROGMEM = 12; // vertical between each numerical output group
-	const int numberPad PROGMEM = 8;  // additional vertical pad for font change offset
+	const int numberPad PROGMEM = 10;  // additional vertical pad for font change offset
 	int negativeMarkOffset =  (yOffset + newLinePad + numberPad - 4 ); // vertical position of the sign for numeric output
 	int negativeMarkOffsetX = 0; // account for proper alignment when theres less than 4 digits shown
 	const int unitOffset PROGMEM = 60; // units should be fixed position, right-aligned
@@ -306,9 +283,9 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 		int displayTemp = abs(measuredTemperature);
 
 		// TEMP Headline
-		display.setCursor(xOffset + graphWidth + textPad, 0);
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad, 0);
 		display.setTextSize(1);
-		display.print("Temperature");
+		display.print(F("Temperature"));
 
 		// Numeric Output TEMP
 
@@ -320,12 +297,12 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 		}else{
 			sigFigPadTemp = 12;
 		}
-		display.setCursor(xOffset + graphWidth + textPad + sigFigPadTemp -2, yOffset + newLinePad + numberPad);
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad + sigFigPadTemp -2, yOffset + newLinePad + numberPad);
 
 		// actual negative sign takes up too much space
 		if( measuredTemperature < 0 ){
-			display.drawPixel(xOffset + graphWidth + ( textPad *3 ) + negativeMarkOffsetX, negativeMarkOffset, WHITE);
-			display.drawPixel(xOffset + graphWidth + ( textPad *3 ) + negativeMarkOffsetX+1, negativeMarkOffset, WHITE);
+			display.drawPixel(xOffset + GRAPH_WIDTH + ( textPad *3 ) + negativeMarkOffsetX, negativeMarkOffset, WHITE);
+			display.drawPixel(xOffset + GRAPH_WIDTH + ( textPad *3 ) + negativeMarkOffsetX+1, negativeMarkOffset, WHITE);
 		}
 
 		display.setFont(&URW_Gothic_L_Book_20);
@@ -335,31 +312,61 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 		// UNIT
 		display.setFont(NULL);
 		display.setTextSize(1);
-		display.setCursor(xOffset + graphWidth + textPad + unitOffset - 6, yOffset + newLinePad + numberPad);
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad + unitOffset - 6, yOffset + newLinePad + numberPad);
 		display.write(0xf7);
-		display.print("C");
+		display.print(F("C"));
 
 	}else{
 
-		if( measuredHumidity < 100.0 ){
+		if(measuredHumidity < 10.0 ){
+			sigFigPadHumidity = 24;
+		}else if( measuredHumidity < 100.0 ){
 			sigFigPadHumidity = 12;
 		}
 
 		// Humidity Headline
 		display.setTextSize(1);
-		display.setCursor(xOffset + graphWidth + textPad, yOffset);
-		display.print("Humidity");
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad, yOffset);
+		display.print(F("Humidity"));
 
 		// Numeric Output Humidity
 		display.setFont(&URW_Gothic_L_Book_20);
 		display.setTextSize(1);
-		display.setCursor(xOffset + graphWidth + textPad + sigFigPadHumidity -2, yOffset + newLinePad + numberPad + 6);
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad + sigFigPadHumidity -2, yOffset + newLinePad + numberPad + 6);
 		display.print(measuredHumidity, 1);
 
 		// UNIT
 		display.setFont(NULL);
-		display.setCursor(xOffset + graphWidth + textPad + unitOffset , yOffset + newLinePad + numberPad);
+		display.setCursor(xOffset + GRAPH_WIDTH + textPad + unitOffset , yOffset + newLinePad + numberPad);
 		display.setTextSize(1);
 		display.write(0x25);
 	}
+}
+
+void slowPrintSuccessOrFail( bool condition ){
+
+	condition ? slowType( F("OK"), 50, false ) : slowType( F("FAIL"), 50, false );
+}
+
+void slowType( String text, int delayTime, bool newLine ){
+
+	if( newLine ){
+
+		display.setCursor(0, lastLine );
+		lastLine += LAST_LINE_INDENT;
+	}
+
+	for( int i = 0; i < text.length(); i++ ){
+
+		display.print( text[ i ] );
+		display.display();
+		delay( delayTime );
+	}
+}
+
+void wipeDisplay(){
+
+	display.clearDisplay(); // remove library banner
+	display.fillScreen(BLACK); // I see a red door...
+	display.display(); // because fillScreen is misleading
 }
