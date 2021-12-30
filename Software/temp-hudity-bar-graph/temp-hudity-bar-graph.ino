@@ -145,20 +145,21 @@ void advanceAnimationTicks(){
 
 	bool alertBlinkTick = ( previousMillisBlinkTick == 0 || currentMillis - previousMillisBlinkTick > ALERT_BLINK_INTERVAL );
 
-	if( previousMillisSensor == 0 || currentMillis - previousMillisSensor > SENSOR_READ_INTERVAL) {
-		previousMillisSensor = currentMillis;
+	if( previousMillisSensor == 0 || currentMillis - previousMillisSensor > SENSOR_READ_INTERVAL){
 
+		previousMillisSensor = currentMillis;
 		readFromSensor();
 	}
 
-	if(previousMillisGraph == 0 || currentMillis - previousMillisGraph > GRAPH_UPDATE_INTERVAL ) {
+	if( previousMillisGraph == 0 || currentMillis - previousMillisGraph > GRAPH_UPDATE_INTERVAL ){
+
 		previousMillisGraph = currentMillis;
 
 		if( !sensorFailedToReport ){
+
 			advanceGraph = true;
 		}
 	}
-
 
 	if( alertBlinkTick ){
 
@@ -169,17 +170,18 @@ void advanceAnimationTicks(){
 
 void readFromSensor(){
 
-
 	measuredHumidity = dht.readHumidity();
 	measuredTemperature = dht.readTemperature();
 
 	// Bail  early if sensor fails to report proper reading
 	if( isnan( measuredTemperature ) || isnan( measuredHumidity )){
+
 		sensorFailedToReport = true;
 		measuredTemperature = isnan( measuredTemperature ) ? 0.0 : measuredTemperature;
 		measuredHumidity = isnan( measuredHumidity ) ? 0.0 : measuredHumidity;
 		return;
 	}else{
+
 		sensorFailedToReport = false;
 	}
 
@@ -200,15 +202,18 @@ void readFromSensor(){
 void renderGraph( bool advanceGraph, byte sensorArray[], byte xOffset, byte yOffset ){
 
 	for( byte step = 2; step < GRAPH_DATUM_COUNT; step+=2 ){
+
 		byte position = yOffset + GRAPH_HEIGHT - sensorArray[ step - 1 ];
 
 		if( position != GRAPH_HEIGHT + yOffset ){
+
 			display.drawLine(GRAPH_WIDTH - step + xOffset, GRAPH_HEIGHT  + yOffset - 1, GRAPH_WIDTH - step + xOffset, position, WHITE);
 		}
 	}
 	if( advanceGraph ){
 		// advanced historical values
 		for( byte step2 = GRAPH_DATUM_COUNT; step2 >= 2; step2--){
+
 			sensorArray[ step2 - 1 ] = sensorArray[ step2 - 2 ];
 		}
 	}
@@ -222,6 +227,7 @@ void renderAxes( byte xOffset, byte yOffset, byte topBound, int lowBound, char *
 
 	// scale marks
 	for( byte count = 0; count <= GRAPH_HEIGHT; count += GRAPH_HEIGHT ){
+
 		byte position = GRAPH_HEIGHT - count;
 		int scaleMark = map( GRAPH_HEIGHT - position, 0, GRAPH_HEIGHT, lowBound, topBound);
 		int scaleOffsetStart = 0;
@@ -235,6 +241,7 @@ void renderAxes( byte xOffset, byte yOffset, byte topBound, int lowBound, char *
 		}
 		// tuck lower value of y-axis into graph
 		if( count == 0 ){
+
 			position -= 2;
 		}
 
@@ -260,6 +267,7 @@ void renderAxes( byte xOffset, byte yOffset, byte topBound, int lowBound, char *
 	}
 
 	for( byte count = 10 + xOffset; count < GRAPH_WIDTH + xOffset; count += 10 ){
+
 		display.drawPixel(count, yOffset , WHITE);
 		display.drawPixel(count, yOffset + GRAPH_HEIGHT + 2 , WHITE);
 	}
@@ -288,7 +296,6 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 		display.print(F("Temperature"));
 
 		// Numeric Output TEMP
-
 
 		// empty character pad
 		if( displayTemp < 10.0 ){
@@ -319,8 +326,10 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 	}else{
 
 		if(measuredHumidity < 10.0 ){
+
 			sigFigPadHumidity = 24;
 		}else if( measuredHumidity < 100.0 ){
+			
 			sigFigPadHumidity = 12;
 		}
 

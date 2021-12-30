@@ -9,6 +9,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <FlashStorage_SAMD.h>
 #include <TimeLib.h>
 #include <ezButton.h>
 #include <TinyGPSPlus.h>
@@ -21,7 +22,7 @@
 // Display Characteristics
 #define DISPLAY_WIDTH 128 // [ PIXELS ] number of available horizontal pixels
 #define DISPLAY_HEIGHT 64 // [ PIXELS ] number of available vertical pixels
-#define SLOW_TYPE_NEXT_LINE_PADDINGE 10 // [ PIXELS ] of padding below any given text animated to UI via "slow typing" effect
+#define SLOW_TYPE_NEXT_LINE_PADDING 10 // [ PIXELS ] of padding below any given text animated to UI via "slow typing" effect
 #define OLED_RESET -1 // [ NUMBER ] digital read pin to reset the display | NOT IMPLEMENTED
 #define ENTER_BUTTON_PIN 0 // [ NUMBER ] digital read pin for button inputs
 
@@ -83,7 +84,7 @@ static const char* directions[ NUMBER_OF_CARDINAL_DIRECTIONS ] = {
 
 bool firstLoad = true;
 bool updateTick = false;
-bool advanceGraph = false;
+bool advanceGraph = true;
 bool sensorFailedToReport = false;
 bool validSatelliteWindow = false;
 bool isValidSatelliteDetailsWindow = false;
@@ -92,11 +93,10 @@ unsigned long testEpoch;
 time_t lastTimeTicked = 0;
 float currentLatitude = 0;
 float currentLongitude = 0;
-float currentHeading = 0;
+double currentHeading = 0;
 float currentAltitude = 0;
-float smoothedHeading = 0;
+double smoothedHeading = 0;
 byte lastLine = 0;
-byte screen = DEFAULT_SCREEN;
 byte numberOfFixedSatellites = 0;
 
 short altitudeHistory[ HISTORICAL_DATUM_COUNT ];
@@ -111,6 +111,9 @@ const unsigned char bitmap [] PROGMEM = {
 	0x10, 0x00, 0xda, 0x20, 0x00, 0x31, 0x40, 0x00, 0x00, 0x80, 0x90, 0x00, 0x00, 0x90, 0x00, 0x00,
 	0x8c, 0x00, 0x00, 0x40, 0x00, 0x00, 0x20, 0x00, 0x00, 0x1c, 0x00, 0x00
 };
+
+byte storedScreen = EEPROM.read( 0 );
+byte screen = ( storedScreen != 255 ) ? storedScreen : DEFAULT_SCREEN;
 
 void setup(){
 
@@ -137,7 +140,7 @@ void setup(){
 
 	slowPrintSuccessOrFail( true );
 
-	lastLine += SLOW_TYPE_NEXT_LINE_PADDINGE;
+	lastLine += SLOW_TYPE_NEXT_LINE_PADDING;
 	slowType( F("Online!"), 10, true );
 	delay(2000);
 	wipeDisplay();
@@ -147,9 +150,11 @@ void setup(){
 void loop() {
 
 	listenToButtonPushes();
+	readGPSData();
 
-	if( isGPSDataAvailable() && gps.satellites.value() > 0 ){
+	if( gps.location.isUpdated() ){
 
+		sensorFailedToReport = false;
 		populateGPSData();
 		updateTimeFromGPS();
 
@@ -166,13 +171,16 @@ void loop() {
 		millisLastValidSignal = millis();
 	}else{
 
+
 		bool isWithinGPSUpdateWindow = ( millis() - millisLastValidSignal < MAX_READINGS_LOST_BEFORE_FAIL * GPS_READ_INTERVAL );
 
 		// Lost Connection : was valid, missed too many signals -> indicate connection lost once!
 		if( validSatelliteWindow && !isWithinGPSUpdateWindow ){
 
-			updateStatus( validSatelliteWindow );
 			validSatelliteWindow = false;
+			sensorFailedToReport = true;
+			updateStatus( validSatelliteWindow );
+
 		// Lost Connection : display last valid data until connection is restored
 		}else if( !firstLoad && !isWithinGPSUpdateWindow ){
 
@@ -183,19 +191,21 @@ void loop() {
 		}
 	}
 
-	advanceAnimationTicks();
-	cacheHistoricalData();
-
 	if( validSatelliteWindow ){
 
 		displayGPSData( true );
 	}
+
+	// this order matters!
+	cacheHistoricalData(); // we always want to advance a historical reading when the device first comes online
+	advanceAnimationTicks();
 
 	// This checks every hour for the switch to and from DST
 	testEpoch += 3600UL;
 }
 
 void initCustomGPSObjects(){
+
 	for( int i=0; i<4; ++i ){
 
 		satNumber[ i ].begin( gps, "GPGSV", 4 + 4 * i ); // offsets 4, 8, 12, 16
@@ -212,17 +222,20 @@ void cacheHistoricalData(){
 
 		// altitudeHistory[ 0 ] = map( constrain( currentAltitude, MIN_ALTITUDE_TRACKED, MAX_ALTITUDE_TRACKED ), MIN_ALTITUDE_TRACKED, MAX_ALTITUDE_TRACKED, 0, GRAPH_HEIGHT );
  		altitudeHistory[ 0 ] = constrain( currentAltitude, MIN_ALTITUDE_TRACKED, MAX_ALTITUDE_TRACKED );
+
 		// advanced historical values
 		for (int i = HISTORICAL_DATUM_COUNT; i >= 2; i--){
 
 			altitudeHistory[ i - 1 ] = altitudeHistory[ i - 2 ];
 		}
+
+		advanceGraph = false;
 	}
 }
 
 void clearAltitudeHistory(){
 
-	for( byte i = 0; i <= HISTORICAL_DATUM_COUNT; i++ ){
+	for( byte i = 0; i < HISTORICAL_DATUM_COUNT; i++ ){
 
 		altitudeHistory[ i ] = 0;
 	}
@@ -234,7 +247,12 @@ void listenToButtonPushes(){
 
 	if( enterButton.isPressed() ){
 
-		screen = ( screen < SCREEN_COUNT - 1 ) ? screen+=1 : 0;
+		screen++;
+
+		if( screen == SCREEN_COUNT ){
+			screen = 0;
+		}
+		updateMemory( 0, screen );
 	}
 }
 
@@ -266,14 +284,14 @@ void splashScreen(){
 	display.drawBitmap( 15, 0, bitmap, 20, 20, WHITE );
 }
 
-void updateStatus( bool validSatelliteWindow ){
+void updateStatus( bool isValidSignalWindow ){
 
 	display.clearDisplay();
 	display.setFont(&Lato_Thin_12);
 	display.setTextSize(1);
 	display.setTextColor(WHITE);
 
-	if( validSatelliteWindow ){
+	if( isValidSignalWindow ){
 
 		display.setCursor(12,23);
 		display.print(F("DOWNLINK OK!\n"));
@@ -344,7 +362,6 @@ void advanceAnimationTicks(){
 	bool satelliteSearchAnimationTick = ( previousMillisSatSearch == 0 || currentMillis - previousMillisSatSearch > SAT_SEARCH_ANIMATION_INTERVAL );
 
 	isValidSatelliteDetailsWindow = ( currentMillis - millisLastValidsatelliteInfo < SAT_DETAIL_INFO_MAX_AGE );
-	advanceGraph = false;
 
 	if( graphAnimationTick ){
 
@@ -363,23 +380,17 @@ void advanceAnimationTicks(){
 	}
 
 	// lerp relevant values
-	smoothedHeading = lerpAngle( smoothedHeading, currentHeading,  EASE_COEFFICIENT );
+	smoothedHeading = lerpAngle( currentHeading, smoothedHeading,  EASE_COEFFICIENT );
 }
 
-bool isGPSDataAvailable(){
+void readGPSData(){
 
-	while ( Serial1.available() ){
+	while ( Serial1.available() > 0 ){
 		// Each byte of NEMA data must be giving to TinyGPS by using encode(). True is returned when new data has been fully decoded and can be used
-		if( gps.encode( Serial1.read() )){
-
-			sensorFailedToReport = false;
-			return true;
-		}
+		gps.encode( Serial1.read() );
 	}
-
-	sensorFailedToReport = true;
-	return false;
 }
+
 
 static void updateTimeFromGPS(){
 
@@ -446,7 +457,7 @@ void drawCurrentHeading( bool hasConnection ){
 
 	display.setCursor( 5, 50 );
 	display.setFont( &Lato_Thin_30 );
-	display.print( currentHeading, 0 );
+	display.print( smoothedHeading, 0 );
 
 	byte radius = 20;
 	display.setFont();
@@ -459,11 +470,16 @@ void drawSatelliteDetails( bool hasConnection ){
 	display.setFont();
 	display.setTextColor( WHITE );
 
-	if( isValidSatelliteDetailsWindow ){
+	bool satelliteDetailsAreValid = totalGPGSVMessages.isUpdated();
+
+	if( isValidSatelliteDetailsWindow && satelliteDetailsAreValid ){
 
 		for( int i=0; i < MAX_SATELLITES; ++i ){
+
+			display.setCursor( 0, i * 10 );
+
 			if( sats[ i ].active ){
-				display.setCursor( 0, i * 10 );
+
 				display.print( i + 1 ); // satellite number
 				display.print(F("|E:"));
 				display.print( sats[ i ].elevation );
@@ -472,6 +488,9 @@ void drawSatelliteDetails( bool hasConnection ){
 				display.print(F("' S:"));
 				display.print( sats[ i ].snr );
 				display.print(F("dB"));
+			}else{
+				display.print( i + 1 ); // satellite number
+				display.print(F(" : No Details"));
 			}
 		}
 	}else{
@@ -504,7 +523,7 @@ void printDegreeMinuteSecond( float value, byte xOffset, byte yOffset, String la
 	display.print(F(": "));
 	display.print( value, 6 );
 
-	display.setCursor( xOffset, yOffset + 15 );
+	display.setCursor( xOffset + 15, yOffset + 15 );
 	bool isNegative = ( value < 0 );
 	byte degree = (byte)abs( value );
 	byte minute = (byte) ( (abs( value ) - (float)degree) * 60.f);
@@ -639,10 +658,9 @@ void drawComprehensiveView( bool hasConnection ){
 	display.setCursor(0,47);
 	display.print(F("Heading:  "));
 
-	int direction = (int)(( smoothedHeading + 11.25f ) / 22.5f);
-	display.print( directions[ direction % 16 ] );
+	display.print( gps.cardinal( currentHeading ));
 	display.print(F(": "));
-	display.println( smoothedHeading, 1 );
+	display.println( currentHeading, 1 );
 
 	display.setCursor( 120,46 );
 	display.write(0xf7);
@@ -682,7 +700,7 @@ void slowType( String text, int delayTime, bool newLine ){
 	if( newLine ){
 
 		display.setCursor(0, lastLine );
-		lastLine += SLOW_TYPE_NEXT_LINE_PADDINGE;
+		lastLine += SLOW_TYPE_NEXT_LINE_PADDING;
 	}
 
 	for( byte i = 0; i < text.length(); i++ ){
@@ -716,12 +734,13 @@ void renderGraph( short sensorArray[], int xOffset, int yOffset ){
 		whichBoundHasMoreDatums += ( currentValue > 0 ) ? 1 : ( currentValue < 0 ) ? -1 : 0;
 	}
 
-	upperBound  = ( upperBound * 2 ) <= MAX_ALTITUDE_TRACKED ? upperBound * 2 : MAX_ALTITUDE_TRACKED;
-	lowerBound  = ( lowerBound * 2 ) >= MIN_ALTITUDE_TRACKED ? lowerBound * 2: MIN_ALTITUDE_TRACKED;
+	upperBound = ( upperBound * 2 ) <= MAX_ALTITUDE_TRACKED ? upperBound * 2 : MAX_ALTITUDE_TRACKED;
+	lowerBound = ( lowerBound * 2 ) >= MIN_ALTITUDE_TRACKED ? lowerBound * 2: MIN_ALTITUDE_TRACKED;
 
 	byte topOfGraph = yOffset;
 	byte bottomOfGraph = topOfGraph + GRAPH_HEIGHT;
-	float ratioOfHighestToLowest = ( whichBoundHasMoreDatums > 0 ) ? 4.0 : 2.0; // todo change ratio depending on where there's more plotted points and current altitude is at/below sealevel
+	// moving scale; favors screen space where there are more datums
+	float ratioOfHighestToLowest = ( whichBoundHasMoreDatums > 0 ) ? 4.0 : 2.0;
 	byte splitPoint = bottomOfGraph - ceil( (float)GRAPH_HEIGHT / ratioOfHighestToLowest ); // sea level, 0 altitude
 	byte graphLowerBound = bottomOfGraph - splitPoint;
 	byte graphUpperBound = splitPoint - yOffset;
@@ -752,15 +771,6 @@ void renderGraph( short sensorArray[], int xOffset, int yOffset ){
 		display.writeFastVLine( GRAPH_WIDTH + xOffset - (step * 2 ), start, length, WHITE ); // Line Datum
 	}
 
-	// advanced historical values
-
-	if( advanceGraph ){
-
-		for( byte step2 = HISTORICAL_DATUM_COUNT; step2 >= 2; step2-- ){
-
-			sensorArray[ step2 - 1 ] = sensorArray[ step2 - 2 ];
-		}
-	}
 
 	// graph height scale
 	display.writeFastVLine(GRAPH_WIDTH + xOffset + 5, yOffset, GRAPH_HEIGHT, WHITE);
@@ -884,16 +894,23 @@ void renderAxes( int xOffset, int yOffset, int topBound, int lowBound ){
 
 void renderGauge( double angle, byte xOffset, byte yOffset, byte radius ){
 
-	byte xCenter = radius;
-	byte yCenter = radius;
-	byte needleLength = ( radius * 1.3f );
+	double xCenter = radius;
+	double yCenter = radius;
+	double needleLength = ( radius * 1.3f );
 
-	int x = -needleLength / 2;
-	byte y = 0;
-	byte x1 = needleLength / 2;
-	byte y1 = 0;
-	byte cx = ( x + x1 ) / 2;
-	byte cy = ( y + y1 ) / 2;
+	double x = -needleLength / 2;
+	double y = 0;
+	double x1 = needleLength / 2;
+	double y1 = 0;
+	double cx = ( x + x1 ) / 2;
+	double cy = ( y + y1 ) / 2;
+
+	double xTip = -needleLength / 12;
+	double yTip = 0;
+	double x1Tip = needleLength / 12;
+	double y1Tip = 0;
+	double cxTip = ( x + x1 ) / 2;
+	double cyTip = ( y + y1 ) / 2;
 
 	double headingTheta = -angle * ( M_PI_LONG / 180.0L ) - ( M_PI_LONG / 2.0L );
 
@@ -910,7 +927,7 @@ void renderGauge( double angle, byte xOffset, byte yOffset, byte radius ){
 	for( int angle = 0; angle < 360; angle+= 360 / 8 ){
 
 		int direction = (int)(( angle + 11.25f ) / 22.5f);
-		float theta = ( angle * ( M_PI_LONG / 180.0f ));
+		double theta = ( (double)angle * ( M_PI_LONG / 180.0L ));
 
 		int trimX = -2;
 		int trimY = -2;
@@ -929,14 +946,14 @@ void renderGauge( double angle, byte xOffset, byte yOffset, byte radius ){
 		}else if( direction == 8 ){ // S Label
 
 			trimY -= 3;
-			trimX = -1;
+			trimX = -2;
 		}else if( direction == 0 ){ // N Label
 
 			trimY = -1;
-			trimX = -1;
+			trimX = -2;
 		}
 
-		theta -= ( M_PI_LONG / 2 );
+		theta -= ( M_PI_LONG / 2.0L );
 
 		byte x = xCenter + xOffset + trimX + (( 10 + radius ) * cos( theta ));
 		byte y = yCenter + yOffset + trimY + (( 10 + radius ) * sin( theta ));
@@ -946,29 +963,32 @@ void renderGauge( double angle, byte xOffset, byte yOffset, byte radius ){
 	}
 
 	// start of needle
-	float rotX = (  -(x - cx) * cos( headingTheta ) + (y - cy) * sin( headingTheta ) ) + cx;
-	float rotY = ( (x - cx) * sin( headingTheta ) + (y - cy) * cos( headingTheta ) ) + cy;
+	int rotX = (  -(x - cx) * cos( headingTheta ) + (y - cy) * sin( headingTheta ) ) + cx;
+	int rotY = ( (x - cx) * sin( headingTheta ) + (y - cy) * cos( headingTheta ) ) + cy;
 
 	//end of needle
-	float rotXEnd = ( -(x1 - cx) * cos( headingTheta ) + (y1 - cy) * sin( headingTheta ) ) + cx;
-	float rotYEnd = ( (x1 - cx) * sin( headingTheta ) + (y1 - cy) * cos( headingTheta ) ) + cy;
+	int rotXEnd = ( -(x1 - cx) * cos( headingTheta ) + (y1 - cy) * sin( headingTheta ) ) + cx;
+	int rotYEnd = ( (x1 - cx) * sin( headingTheta ) + (y1 - cy) * cos( headingTheta ) ) + cy;
+
+	double rotXTip = ( -(x1Tip - cxTip) * cos( headingTheta ) + (y1Tip - cyTip) * sin( headingTheta ) ) + cxTip;
+	double rotYTip = ( (x1Tip - cxTip) * sin( headingTheta ) + (y1Tip - cyTip) * cos( headingTheta ) ) + cyTip;
 
 	display.drawCircle(rotX + xOffset + radius, rotY + yOffset + radius,2, WHITE);
-	drawRotatedTriangle( -1, (rotXEnd + xOffset + radius), (rotYEnd + yOffset + radius), headingTheta );
+	drawRotatedTriangle( -1, ( rotXTip + xOffset + radius ), (rotYTip + yOffset + radius ), headingTheta );
 
 	display.drawLine(rotX + xOffset + radius, rotY + yOffset + radius, rotXEnd + xOffset + radius, rotYEnd + yOffset + radius, WHITE);
 }
 
-void drawRotatedTriangle( int sign, int xOffset, int yOffset, float theta ){
+void drawRotatedTriangle( int sign, double xOffset, double yOffset, double theta ){
 
-	int tX = 5 * sign;
-	byte tY = 0;
+	double tX = 20 * sign;
+	double tY = 0;
 
-	byte t1X = 0;
-	int t1Y = 2 * sign;
+	double t1X = 0;
+	double t1Y = 6 * sign;
 
-	byte t2X = 0;
-	int t2Y = -2 * sign;
+	double t2X = 0;
+	double t2Y = -6 * sign;
 
 	display.drawTriangle(
 		xOffset + (  tX * cos( theta ) + tY * sin( theta ) ),
@@ -989,12 +1009,17 @@ void wipeDisplay(){
 	display.display(); // because fillScreen is misleading
 }
 
+void updateMemory( byte address, byte value ){
+
+	EEPROM.update( address, value );
+	EEPROM.commit();
+}
 
 double mapf(double x, double in_min, double in_max, double out_min, double out_max){
   return (double)(x - in_min) * (out_max - out_min) / (double)(in_max - in_min) + out_min;
 }
 
-float clampFloat(float value, float min, float max){
+double clampDouble(double value, double min, double max){
 	if( value < min ){
 
 		value = min;
@@ -1006,30 +1031,30 @@ float clampFloat(float value, float min, float max){
 	return value;
 }
 
-float clamp( float value ){
-	if( value < 0.0f ){
+double clamp( double value ){
+	if( value < 0.0L ){
 
-		return 0.0F;
-	}else if( value > 1.0f ){
+		return 0.0L;
+	}else if( value > 1.0L ){
 
-		return 1.0f;
+		return 1.0L;
 	}else{
 
 		return value;
 	}
 }
 
-float Repeat( float t, float length ){
+double Repeat( double t, double length ){
 
-	return clampFloat( t - floor( t / length ) * length, 0.0f, length );
+	return clampDouble( t - floor( t / length ) * length, 0.0L, length );
 }
 
-float lerpAngle(float a, float b, float t){
+double lerpAngle(double a, double b, double t){
 
-	float delta = Repeat( ( b - a ), 360.0f );
+	double delta = Repeat( ( b - a ), 360.0L );
 
-	if( delta > 180.0f ){
-		delta -= 360.0f;
+	if( delta > 180.0L ){
+		delta -= 360.0L;
 	}
 	return a + delta * clamp(t);
 }
