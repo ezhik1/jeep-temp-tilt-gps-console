@@ -4,6 +4,7 @@
 // - IMPORTANT : Adafruit DHT Library 1.3.0 is the last stable library for Chinese DHT22 clones. Anything newer has, in practice, failed to report
 // - display has visual artifacts at ~40% dynamic memory
 // - arduino becomes unstable at ~50% dynamic memory
+// DHT Library hotfix for negative temperatures from https://github.com/adafruit/DHT-sensor-library/pull/178/files
 
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -21,7 +22,7 @@
 
 #define ALERT_BLINK_INTERVAL 500 // [ MILLIS ] between alert banners
 
-DHT dht( DHTPIN, DHTTYPE );
+DHT dht( DHTPIN, DHTTYPE, 1 );
 Adafruit_SSD1306 display( DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, OLED_RESET );
 
 byte lastLine = 0;
@@ -85,8 +86,7 @@ void setup(){
 	clearHistoricalValues();
 	slowPrintSuccessOrFail( true );
 
-	display.setFont(&URW_Gothic_L_Book_20);
-	display.setCursor( 22, 62 );
+	display.setCursor( 0, 50 );
 	display.print(F("ONLINE!"));
 	display.display();
 
@@ -134,7 +134,7 @@ void renderSensorErrorAlert(){
 	display.setCursor( 22, 32 );
 
 	display.setTextColor( BLACK, WHITE );
-	display.print( F("Sensor Offline!") );
+	display.print( F("SENSOR OFFLINE!") );
 	display.setTextColor( WHITE, BLACK );
 }
 
@@ -201,13 +201,13 @@ void readFromSensor(){
 
 void renderGraph( bool advanceGraph, byte sensorArray[], byte xOffset, byte yOffset ){
 
-	for( byte step = 2; step < GRAPH_DATUM_COUNT; step+=2 ){
+	for( byte step = 2; step < GRAPH_DATUM_COUNT; step+=2 ){ // TODO: step should be +=1, sample size can then be reduced
 
 		byte position = yOffset + GRAPH_HEIGHT - sensorArray[ step - 1 ];
 
 		if( position != GRAPH_HEIGHT + yOffset ){
 
-			display.drawLine(GRAPH_WIDTH - step + xOffset, GRAPH_HEIGHT  + yOffset - 1, GRAPH_WIDTH - step + xOffset, position, WHITE);
+			display.drawLine(GRAPH_WIDTH - step + xOffset, GRAPH_HEIGHT  + yOffset - 1, GRAPH_WIDTH - step + xOffset, position, WHITE); // TODO: step should be *2
 		}
 	}
 	if( advanceGraph ){
@@ -293,7 +293,7 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 		// TEMP Headline
 		display.setCursor(xOffset + GRAPH_WIDTH + textPad, 0);
 		display.setTextSize(1);
-		display.print(F("Temperature"));
+		display.print(F("TEMPERATURE"));
 
 		// Numeric Output TEMP
 
@@ -329,14 +329,14 @@ void renderNumericOutput( int xOffset, int yOffset, char *type ){
 
 			sigFigPadHumidity = 24;
 		}else if( measuredHumidity < 100.0 ){
-			
+
 			sigFigPadHumidity = 12;
 		}
 
 		// Humidity Headline
 		display.setTextSize(1);
 		display.setCursor(xOffset + GRAPH_WIDTH + textPad, yOffset);
-		display.print(F("Humidity"));
+		display.print(F("HUMIDITY"));
 
 		// Numeric Output Humidity
 		display.setFont(&URW_Gothic_L_Book_20);
